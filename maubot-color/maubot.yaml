@@ -5,5 +5,3 @@ license: GPL-3.0-or-later
 modules:
 - color
 main_class: ColorBot
-dependencies:
-- random
