@@ -1,0 +1,9 @@
+maubot: 0.1.0
+id: in.northwestw.color
+version: 1.0.0
+license: GPL-3.0-or-later
+modules:
+- color
+main_class: ColorBot
+dependencies:
+- random
