@@ -1,0 +1,7 @@
+maubot: 0.1.0
+id: in.northwestw.splatoon
+version: 1.0.0
+license: GPL-3.0-or-later
+modules:
+- splatoon
+main_class: Splatoon3Bot
