@@ -2,9 +2,5 @@
 mkdir -p build
 for dir in maubot-*; do
 	echo Packaging $dir...
-	(
-		cd $dir
-		sh mbp.sh
-		mv $dir.mbp ../build/$dir.mbp
-	)
+	yes | ./.venv/bin/mbc build $dir -o build/$dir.mbp
 done
