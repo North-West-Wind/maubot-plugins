@@ -53,7 +53,7 @@ class DBManager:
 		return Subscription.from_row(row)
 
 	async def subscribe(self, roomId: RoomID, festStart: bool = False, bigRunStart: bool = False, eventStart: bool = False) -> None:
-		oldSub = self.getSubscription(roomId)
+		oldSub = await self.getSubscription(roomId)
 		if oldSub:
 			q = """
 			UPDATE subscription SET fest_start = $2, bigrun_start = $3, event_start = $4 WHERE room_id = $1
