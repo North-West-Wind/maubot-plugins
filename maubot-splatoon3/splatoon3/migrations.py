@@ -17,3 +17,7 @@ async def upgrade_v1(conn: Connection, scheme: Scheme) -> None:
 			PRIMARY KEY (id)
 		)"""
 	)
+
+@upgrade_table.register(description="More events for subscription")
+async def upgrade_v2(conn: Connection) -> None:
+	await conn.execute("ALTER TABLE subscription ADD COLUMN event_happen BOOLEAN DEFAULT false")

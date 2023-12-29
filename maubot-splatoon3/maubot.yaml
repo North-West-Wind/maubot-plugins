@@ -5,8 +5,5 @@ license: GPL-3.0-or-later
 modules:
 - splatoon3
 main_class: Splatoon3Plugin
-dependencies:
-- schedule
-- pytz
 database: true
 database_type: asyncpg

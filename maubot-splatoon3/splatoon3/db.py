@@ -10,6 +10,7 @@ class Subscription:
 	fest_start: bool
 	bigrun_start: bool
 	event_start: bool
+	event_happen: bool
 
 	@classmethod
 	def from_row(cls, row: Record | None) -> Subscription | None:
@@ -21,11 +22,13 @@ class Subscription:
 		fest_start = bool(row["fest_start"])
 		bigrun_start = bool(row["bigrun_start"])
 		event_start = bool(row["event_start"])
+		event_happen = bool(row["event_happen"])
 		return cls(
 			room_id=room_id,
 			fest_start=fest_start,
 			bigrun_start=bigrun_start,
-			event_start=event_start
+			event_start=event_start,
+			event_happen=event_happen
 		)
 
 class DBManager:
@@ -36,7 +39,7 @@ class DBManager:
 
 	async def getSubscriptions(self) -> list[Subscription]:
 		q = """
-		SELECT room_id, fest_start, bigrun_start, event_start
+		SELECT room_id, fest_start, bigrun_start, event_start, event_happen
 		FROM subscription
 		"""
 		rows = await self.db.fetch(q)
@@ -45,25 +48,25 @@ class DBManager:
 
 	async def getSubscription(self, roomId: RoomID) -> Subscription:
 		q = """
-		SELECT room_id, fest_start, bigrun_start, event_start
+		SELECT room_id, fest_start, bigrun_start, event_start, event_happen
 		FROM subscription
 		WHERE room_id = $1
 		"""
 		row = await self.db.fetchrow(q, roomId)
 		return Subscription.from_row(row)
 
-	async def subscribe(self, roomId: RoomID, festStart: bool = False, bigRunStart: bool = False, eventStart: bool = False) -> None:
+	async def subscribe(self, roomId: RoomID, festStart: bool = False, bigRunStart: bool = False, eventStart: bool = False, eventHappen: bool = False) -> None:
 		oldSub = await self.getSubscription(roomId)
 		if oldSub:
 			q = """
-			UPDATE subscription SET fest_start = $2, bigrun_start = $3, event_start = $4 WHERE room_id = $1
+			UPDATE subscription SET fest_start = $2, bigrun_start = $3, event_start = $4, event_happen = $5 WHERE room_id = $1
 			"""
 		else:
 			q = """
-			INSERT INTO subscription (room_id, fest_start, bigrun_start, event_start)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO subscription (room_id, fest_start, bigrun_start, event_start, event_happen)
+			VALUES ($1, $2, $3, $4, $5)
 			"""
-		await self.db.execute(q, roomId, festStart, bigRunStart, eventStart)
+		await self.db.execute(q, roomId, festStart, bigRunStart, eventStart, eventHappen)
 
 	async def unsubscribe(self, roomId: RoomID) -> None:
 		q = "DELETE FROM subscription WHERE room_id = $1"

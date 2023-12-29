@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
 from maubot.matrix import parse_formatted
-from mautrix.types import EventType, Format, StateEvent, TextMessageEventContent
+from mautrix.types import EventType, Format, MessageType, RoomID, StateEvent, TextMessageEventContent
 from mautrix.util.async_db import UpgradeTable
-import pytz
-import schedule
+import time
 from .db import DBManager
 from .migrations import upgrade_table
 
@@ -25,6 +25,7 @@ class dotdict(dict):
 
 class Splatoon3Plugin(Plugin):
 	dbm: DBManager
+	task: asyncio.Future
 
 	@classmethod
 	def get_db_upgrade_table(cls) -> UpgradeTable:
@@ -33,7 +34,7 @@ class Splatoon3Plugin(Plugin):
 	async def start(self) -> None:
 		await super().start()
 		self.dbm = DBManager(self.database)
-		schedule.every().hour.at(":00", pytz.timezone('UTC')).do(self.rotationUpdate)
+		self.task = asyncio.create_task(self.rotationUpdateLoop())
 
 	@command.new(help="Shows you the current rotation.", require_subcommand=False)
 	async def splatoon3(self, evt: MessageEvent) -> None:
@@ -76,13 +77,13 @@ class Splatoon3Plugin(Plugin):
 			# todo when eggstra work happens
 			pass
 
-		nextChallengeTime = data.eventSchedules.nodes[0].timePeriods[0]
+		nextChallengeTime = data.eventSchedules.nodes[0].timePeriods[self._get_next_period_index(data.eventSchedules.nodes[0].timePeriods)]
 		challengeName = data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.name
 		description += "\n\n**" + challengeName + "** "
 		if datetime.fromisoformat(nextChallengeTime.startTime) <= datetime.utcnow().replace(tzinfo=timezone.utc) <= datetime.fromisoformat(nextChallengeTime.endTime):
-			description += "is happening right now!"
+			description += "is happening **right now!**"
 		else:
-			description += "will happen on " + self._iso_str(nextChallengeTime.startTime) + " (UTC+00:00)"
+			description += "will happen on **" + self._iso_str(nextChallengeTime.startTime) + "** (UTC+00:00)"
 		description += "  \n*" + data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.desc + "*"
 		description += "  \n" + self._stages_str(data.eventSchedules.nodes[0].leagueMatchSetting.vsStages)
 
@@ -216,22 +217,24 @@ class Splatoon3Plugin(Plugin):
 		data = dotdict(await resp.json()).data
 		description = "Note: The times are in UTC+00:00"
 		for ii, node in enumerate(data.eventSchedules.nodes):
+			nextTimeIndex = self._get_next_period_index(node.timePeriods)
 			description += "\n# " + node.leagueMatchSetting.leagueMatchEvent.name + "\n"
 			description += node.leagueMatchSetting.leagueMatchEvent.desc + "\n\n"
 			description += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
 			description += "**" + self._iso_str(node.timePeriods[0].startTime) + " - " + self._iso_str(node.timePeriods[-1].endTime) + "**"
 			if ii == 0:
-				if self._is_now_between_isos(node.timePeriods[0].startTime, node.timePeriods[-1].endTime):
+				if self._is_now_between_isos(node.timePeriods[nextTimeIndex].startTime, node.timePeriods[nextTimeIndex].endTime):
 					description += " **(Now!)**"
 			description += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
 		await evt.reply(description, allow_html=True)
 
-	@splatoon3.subcommand("subscribe", help="Get notified when special events start. You can pass multiple arguments at once. Omitting arguments will unsubscribe the room from notifications. Valid events: festStart, bigRunStart, challengeStart")
+	@splatoon3.subcommand("subscribe", help="Get notified when special events start. You can pass multiple arguments at once. Omitting arguments will unsubscribe the room from notifications. Valid events: festStart, bigRunStart, challengeStart, challengeHappen")
 	@command.argument("events", required=False, pass_raw=True)
 	async def subscribe(self, evt: MessageEvent, events: str) -> None:
 		festStart = False
 		bigRunStart = False
 		eventStart = False
+		eventHappen = False
 		for arg in events.split():
 			match arg:
 				case "festStart":
@@ -240,7 +243,9 @@ class Splatoon3Plugin(Plugin):
 					bigRunStart = True
 				case "challengeStart":
 					eventStart = True
-		await self.dbm.subscribe(evt.room_id, festStart, bigRunStart, eventStart)
+				case "challengeHappen":
+					eventHappen = True
+		await self.dbm.subscribe(evt.room_id, festStart, bigRunStart, eventStart, eventHappen)
 		description = "Subscribed to "
 		if (not festStart) and (not bigRunStart) and (not eventStart):
 			description += "nothing."
@@ -252,6 +257,8 @@ class Splatoon3Plugin(Plugin):
 				things.append("**Big Run Start**")
 			if eventStart:
 				things.append("**Challenge Start**")
+			if eventHappen:
+				things.append("**Challenge Happening**")
 			description += ", ".join(things)
 		await evt.reply(description)
 	
@@ -261,6 +268,7 @@ class Splatoon3Plugin(Plugin):
 		festStart = sub.fest_start if sub else False
 		bigRunStart = sub.bigrun_start if sub else False
 		eventStart = sub.event_start if sub else False
+		eventHappen = sub.event_happen if sub else False
 		description = "This room is subscribed to "
 		if (not festStart) and (not bigRunStart) and (not eventStart):
 			description += "nothing."
@@ -272,14 +280,33 @@ class Splatoon3Plugin(Plugin):
 				things.append("**Big Run Start**")
 			if eventStart:
 				things.append("**Challenge Start**")
+			if eventHappen:
+				things.append("**Challenge Happening**")
 			description += ", ".join(things)
 		await evt.reply(description)
+	
+	@splatoon3.subcommand("trigger", help="Trigger a rotation check.")
+	async def trigger(self, evt: MessageEvent) -> None:
+		self.log.debug("Triggering rotation check")
+		await self.rotationUpdate()
 
 	@event.on(EventType.ROOM_TOMBSTONE)
 	async def tombstone(self, evt: StateEvent) -> None:
 		if not evt.content.replacement_room:
 			return
 		self.dbm.updateRoomId(evt.room_id, evt.content.replacement_room)
+
+	async def rotationUpdateLoop(self) -> None:
+		while True:
+			try:
+				await self.rotationUpdate()
+			except Exception:
+				self.log.exception("Fatal error while making rotation update notifs")
+			delta = timedelta(hours=1)
+			now = datetime.now()
+			nextHour = (now + delta).replace(microsecond=0, second=1, minute=0)
+			self.log.debug("Next rotation check will be run at " + nextHour.strftime("%H:%M:%S") + " which is " + (nextHour - now).seconds + " seconds away")
+			await asyncio.sleep((nextHour - now).seconds)
 
 	async def rotationUpdate(self) -> None:
 		if datetime.now().hour % 2:
@@ -291,29 +318,37 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		challengeStr = ""
+		challengeStartStr = ""
 		node = data.eventSchedules.nodes[0]
-		if len(node.timePeriods) == 6:
-			if self._is_now_between_isos(node.timePeriods[0].startTime, node.timePeriods[0].endTime):
-				challengeStr = f"# {node.leagueMatchSetting.leagueMatchEvent.name}"
-				challengeStr += "\nis happening right now!  \n"
-				challengeStr += node.leagueMatchSetting.leagueMatchEvent.desc + "\n\n"
-				challengeStr += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
-				challengeStr += "**" + self._iso_str(node.timePeriods[0].startTime) + " - " + self._iso_str(node.timePeriods[-1].endTime) + "**"
-				challengeStr += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
+		if self._is_now_between_isos(node.timePeriods[0].startTime, node.timePeriods[0].endTime):
+			self.log.debug("challenge starting")
+			challengeStartStr = f"# {node.leagueMatchSetting.leagueMatchEvent.name}"
+			challengeStartStr += "\nis starting its first rotation **right now!**  \n"
+			challengeStartStr += node.leagueMatchSetting.leagueMatchEvent.desc + "\n\n"
+			challengeStartStr += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
+			challengeStartStr += "**" + self._iso_str(node.timePeriods[0].startTime) + " - " + self._iso_str(node.timePeriods[-1].endTime) + "** (UTC+00:00)"
+			challengeStartStr += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
+		
+		challengeHappenStr = ""
+		if not challengeStartStr:
+			nextTimeIndex = self._get_next_period_index(node.timePeriods)
+			if self._is_now_between_isos(node.timePeriods[nextTimeIndex].startTime, node.timePeriods[nextTimeIndex].endTime):
+				self.log.debug("challenge happening")
+				challengeHappenStr = f"# {node.leagueMatchSetting.leagueMatchEvent.name}"
+				challengeHappenStr += "\nis happening **right now!**  \n"
+				challengeHappenStr += node.leagueMatchSetting.leagueMatchEvent.desc + "\n\n"
+				challengeHappenStr += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
+				challengeHappenStr += "**" + self._iso_str(node.timePeriods[nextTimeIndex].startTime) + " - " + self._iso_str(node.timePeriods[nextTimeIndex].endTime) + "** (UTC+00:00)"
+				challengeHappenStr += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
 		# todo make festStr and bigRunStr when splatfest or big run happens
 		festStr = ""
 		bigRunStr = ""
 		subs = await self.dbm.getSubscriptions()
 		for sub in subs:
-			if challengeStr and sub.event_start:
-				content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=challengeStr)
-				content.format = Format.HTML
-				content.body, content.formatted_body = await parse_formatted(
-					content.body, render_markdown=True, allow_html=True
-				)
-				await self.client.send_message_event(sub.room_id, EventType.ROOM_MESSAGE, content)
-
+			if challengeStartStr and (sub.event_start or sub.event_happen):
+				await self._send_rotation_update(sub.room_id, challengeStartStr)
+			elif challengeHappenStr and sub.event_happen:
+				await self._send_rotation_update(sub.room_id, challengeHappenStr)
 	def _stages_str(self, vsStages: list[dotdict]) -> str:
 		return " | ".join(map(lambda x: x.name, vsStages))
 
@@ -322,3 +357,19 @@ class Splatoon3Plugin(Plugin):
 
 	def _is_now_between_isos(self, start: str, end: str) -> bool:
 		return datetime.fromisoformat(start) < datetime.utcnow().replace(tzinfo=timezone.utc) < datetime.fromisoformat(end)
+
+	async def _send_rotation_update(self, roomId: RoomID, text: str) -> None:
+		content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=text)
+		content.format = Format.HTML
+		content.body, content.formatted_body = await parse_formatted(
+			content.body, render_markdown=True, allow_html=True
+		)
+		await self.client.send_message_event(roomId, EventType.ROOM_MESSAGE, content)
+
+	def _get_next_period_index(self, timePeriods: list[dotdict]) -> int:
+		nextTimeIndex = 0
+		for jj in range(len(timePeriods) - 1):
+			if self._is_now_between_isos(timePeriods[jj].endTime, timePeriods[jj+1].endTime):
+				nextTimeIndex = jj+1
+				break
+		return nextTimeIndex
