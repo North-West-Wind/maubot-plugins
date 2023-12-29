@@ -11,7 +11,7 @@ from .migrations import upgrade_table
 
 # remind you that i'm a javascript programmer
 class dotdict(dict):
-  # dot.notation access to dictionary attributes
+	# dot.notation access to dictionary attributes
 	# https://stackoverflow.com/questions/2352181/how-to-use-a-dot-to-access-members-of-dictionary
 	def __getattr__(*args):
 		val = dict.get(*args)
@@ -288,27 +288,37 @@ class Splatoon3Plugin(Plugin):
 	@splatoon3.subcommand("trigger", help="Trigger a rotation check.")
 	async def trigger(self, evt: MessageEvent) -> None:
 		self.log.debug("Triggering rotation check")
-		await self.rotationUpdate()
+		await self._rotationUpdate()
 
 	@event.on(EventType.ROOM_TOMBSTONE)
 	async def tombstone(self, evt: StateEvent) -> None:
 		if not evt.content.replacement_room:
 			return
 		self.dbm.updateRoomId(evt.room_id, evt.content.replacement_room)
-
+	
 	async def rotationUpdateLoop(self) -> None:
+		try:
+			await self._rotationUpdateLoop()
+		except asyncio.CancelledError:
+			self.log.debug("Checking stopped")
+		except Exception:
+			self.log.exception("Fatal error while checking rotation")
+
+	async def _rotationUpdateLoop(self) -> None:
 		while True:
 			try:
-				await self.rotationUpdate()
+				await self._rotationUpdate()
+			except asyncio.CancelledError:
+				self.log.debug("Checking stopped")
 			except Exception:
 				self.log.exception("Fatal error while making rotation update notifs")
 			delta = timedelta(hours=1)
 			now = datetime.now()
 			nextHour = (now + delta).replace(microsecond=0, second=1, minute=0)
-			self.log.debug("Next rotation check will be run at " + nextHour.strftime("%H:%M:%S") + " which is " + (nextHour - now).seconds + " seconds away")
+			self.log.debug("Next rotation check will be run at " + nextHour.strftime("%H:%M:%S") + " which is " + str((nextHour - now).seconds) + " seconds away")
 			await asyncio.sleep((nextHour - now).seconds)
 
-	async def rotationUpdate(self) -> None:
+	async def _rotationUpdate(self) -> None:
 		if datetime.now().hour % 2:
 			# hour is odd. no update
 			return
