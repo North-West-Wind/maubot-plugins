@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+import io
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
 from maubot.matrix import parse_formatted
-from mautrix.types import EventType, Format, MessageType, RoomID, StateEvent, TextMessageEventContent
+from mautrix.types import EventType, Format, ImageInfo, MediaMessageEventContent, MessageType, RoomID, StateEvent, TextMessageEventContent
 from mautrix.util.async_db import UpgradeTable
+from PIL import Image
 import time
 from .db import DBManager
 from .migrations import upgrade_table
@@ -228,15 +230,18 @@ class Splatoon3Plugin(Plugin):
 			description += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
 		await evt.reply(description, allow_html=True)
 
-	@splatoon3.subcommand("subscribe", help="Get notified when special events start. You can pass multiple arguments at once. Omitting arguments will unsubscribe the room from notifications. Valid events: festStart, bigRunStart, challengeStart, challengeHappen")
+	@splatoon3.subcommand("subscribe", help="Get notified when special events start. You can pass multiple arguments at once. Omitting arguments will unsubscribe the room from notifications. Valid events: festSoon, festStart, bigRunStart, challengeStart, challengeHappen")
 	@command.argument("events", required=False, pass_raw=True)
 	async def subscribe(self, evt: MessageEvent, events: str) -> None:
+		festSoon = False
 		festStart = False
 		bigRunStart = False
 		eventStart = False
 		eventHappen = False
 		for arg in events.split():
 			match arg:
+				case "festSoon":
+					festSoon = True
 				case "festStart":
 					festStart = True
 				case "bigRunStart":
@@ -245,12 +250,14 @@ class Splatoon3Plugin(Plugin):
 					eventStart = True
 				case "challengeHappen":
 					eventHappen = True
-		await self.dbm.subscribe(evt.room_id, festStart, bigRunStart, eventStart, eventHappen)
+		await self.dbm.subscribe(evt.room_id, festStart, bigRunStart, eventStart, eventHappen, festSoon)
 		description = "Subscribed to "
 		if (not festStart) and (not bigRunStart) and (not eventStart):
 			description += "nothing."
 		else:
 			things = list()
+			if festSoon:
+				things.append("**Splatfest Vote**")
 			if festStart:
 				things.append("**Splatfest Start**")
 			if bigRunStart:
@@ -265,6 +272,7 @@ class Splatoon3Plugin(Plugin):
 	@splatoon3.subcommand("subscriptions", help="Check subscriptions of this room.")
 	async def subscriptions(self, evt: MessageEvent) -> None:
 		sub = await self.dbm.getSubscription(evt.room_id)
+		festSoon = sub.fest_soon if sub else False
 		festStart = sub.fest_start if sub else False
 		bigRunStart = sub.bigrun_start if sub else False
 		eventStart = sub.event_start if sub else False
@@ -274,6 +282,8 @@ class Splatoon3Plugin(Plugin):
 			description += "nothing."
 		else:
 			things = list()
+			if festSoon:
+				things.append("**Splatfest Vote**")
 			if festStart:
 				things.append("**Splatfest Start**")
 			if bigRunStart:
@@ -325,7 +335,7 @@ class Splatoon3Plugin(Plugin):
 		self.log.debug("Checking rotation at " + datetime.now().strftime("%m/%d %H:%M"))
 		resp = await self.http.get("https://splatoon3.ink/data/schedules.json")
 		if not resp.ok:
-			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
+			self.log.info("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
 		challengeStartStr = ""
@@ -350,15 +360,74 @@ class Splatoon3Plugin(Plugin):
 				challengeHappenStr += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
 				challengeHappenStr += "**" + self._iso_str(node.timePeriods[nextTimeIndex].startTime) + " - " + self._iso_str(node.timePeriods[nextTimeIndex].endTime) + "** (UTC+00:00)"
 				challengeHappenStr += "  \n" + self._stages_str(node.leagueMatchSetting.vsStages) + " **" + node.leagueMatchSetting.vsRule.name + "**"
-		# todo make festStr and bigRunStr when splatfest or big run happens
-		festStr = ""
+
+		# todo make bigRunStr when big run happens
 		bigRunStr = ""
+
+		# ongoing splatfest check
+		festSoonStrs = list()
+		festSoonImgs = list()
+		festSoonStr = ""
+		resp = await self.http.get("https://splatoon3.ink/data/festivals.json")
+		if not resp.ok:
+			self.log.info("Splatoon3.ink is currently down. Unable to fetch festivals data.")
+			return
+		data = dotdict(await resp.json())
+		pastFests = await self.dbm.getPastFests()
+		ids = list(map(lambda x: x.fest_id, pastFests))
+		for region in data.keys():
+			node = dotdict(data[region]).data.festRecords.nodes[0]
+			if node["__splatoon3ink_id"] in ids or node.state != "SCHEDULED":
+				continue
+			ids.append(node["__splatoon3ink_id"])
+			await self.dbm.addFest(node["__splatoon3ink_id"], node.startTime)
+			if not festSoonStr:
+				festSoonStr += "Splatfest happening soon! You can vote now!"
+			indFestSoonStr = f"# {node.title}\n"
+			indFestSoonStr += "This Splatfest will happen on **" + self._iso_str(node.startTime) + "** - **" + self._iso_str(node.endTime) + "**  \n"
+			indFestSoonStr += "Teams: **" + "** | **".join(list(map(lambda team: team.teamName, node.teams))) + "**"
+			festSoonStrs.append(indFestSoonStr)
+			festSoonImgs.append(node.image.url)
+
+		# splatfest start check
+		festStartStrs = list()
+		festStartImgs = list()
+		festStartStr = ""
+		for pastFest in pastFests:
+			if self._is_now_after_iso(pastFest.start_time) and not pastFest.reported:
+				for region in data.keys():
+					node = dotdict(data[region]).data.festRecords.nodes[0]
+					if node["__splatoon3ink_id"] == pastFest.fest_id:
+						if not festStartStr:
+							festStartStr = "Splatfest is happening!"
+						indFestStartStr = f"# {node.title}\n"
+						indFestStartStr += "This Splatfest is going from **" + self._iso_str(node.startTime) + "** to **" + self._iso_str(node.endTime) + "**  \n"
+						indFestStartStr += "Teams: **" + "** | **".join(list(map(lambda team: team.teamName, node.teams))) + "**"
+						festStartStrs.append(indFestStartStr)
+						festStartImgs.append(node.image.url)
+						await self.dbm.markFestReported(pastFest.fest_id)
+						break
+
+
 		subs = await self.dbm.getSubscriptions()
 		for sub in subs:
 			if challengeStartStr and (sub.event_start or sub.event_happen):
 				await self._send_rotation_update(sub.room_id, challengeStartStr)
 			elif challengeHappenStr and sub.event_happen:
 				await self._send_rotation_update(sub.room_id, challengeHappenStr)
+			
+			if festSoonStr and sub.fest_soon:
+				await self._send_rotation_update(sub.room_id, festSoonStr)
+				for ii in range(len(festSoonStrs)):
+					await self._send_rotation_update(sub.room_id, festSoonStrs[ii])
+					await self._send_rotation_image(sub.room_id, festSoonImgs[ii])
+			if festStartStr and sub.fest_start:
+				await self._send_rotation_update(sub.room_id, festStartStr)
+				for ii in range(len(festStartStrs)):
+					await self._send_rotation_update(sub.room_id, festStartStrs[ii])
+					await self._send_rotation_image(sub.room_id, festStartImgs[ii])
+
+
 	def _stages_str(self, vsStages: list[dotdict]) -> str:
 		return " | ".join(map(lambda x: x.name, vsStages))
 
@@ -368,6 +437,9 @@ class Splatoon3Plugin(Plugin):
 	def _is_now_between_isos(self, start: str, end: str) -> bool:
 		return datetime.fromisoformat(start) < datetime.utcnow().replace(tzinfo=timezone.utc) < datetime.fromisoformat(end)
 
+	def _is_now_after_iso(self, start: str) -> bool:
+		return datetime.fromisoformat(start) < datetime.utcnow().replace(tzinfo=timezone.utc)
+
 	async def _send_rotation_update(self, roomId: RoomID, text: str) -> None:
 		content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=text)
 		content.format = Format.HTML
@@ -375,6 +447,26 @@ class Splatoon3Plugin(Plugin):
 			content.body, render_markdown=True, allow_html=True
 		)
 		await self.client.send_message_event(roomId, EventType.ROOM_MESSAGE, content)
+
+	async def _send_rotation_image(self, roomId: RoomID, url: str) -> None:
+		info = ImageInfo()
+		# fetch the image
+		resp = await self.http.get(url)
+		if not resp.ok:
+			self.log.info("Failed to fetch image: " + url)
+			return
+		img = Image.open(io.BytesIO(await resp.read()))
+		imgByteArr = io.BytesIO()
+		img.save(imgByteArr, format="PNG")
+		imgByteArr = imgByteArr.getvalue()
+		# write image info
+		info.mimetype = "image/png"
+		info.size = len(imgByteArr)
+		info.width, info.height = img.size
+		# upload image
+		url = await self.client.upload_media(imgByteArr, info.mimetype, "rot.png")
+		# send image
+		await self.client.send_message_event(roomId, EventType.ROOM_MESSAGE, MediaMessageEventContent(url=url, info=info, body="rot.png", msgtype=MessageType.IMAGE))
 
 	def _get_next_period_index(self, timePeriods: list[dotdict]) -> int:
 		nextTimeIndex = 0
