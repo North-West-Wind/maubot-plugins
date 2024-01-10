@@ -1,0 +1,7 @@
+maubot: 0.3.0
+id: in.northwestw.summatia
+version: 1.0.0
+license: GPL-3.0-or-later
+modules:
+- summatia
+main_class: SummatiaPlugin
