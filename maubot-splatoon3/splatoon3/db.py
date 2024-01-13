@@ -119,7 +119,7 @@ class DBManager:
 	async def markFestReported(self, fest_id: str) -> None:
 		q = """
 		UPDATE past_fest
-		SET COLUMN reported = $2
+		SET reported = $2
 		WHERE fest_id = $1
 		"""
 		await self.db.execute(q, fest_id, True)
