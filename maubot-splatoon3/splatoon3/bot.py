@@ -7,6 +7,7 @@ from maubot.matrix import parse_formatted
 from mautrix.types import EventType, Format, ImageInfo, MediaMessageEventContent, MessageType, RoomID, StateEvent, TextMessageEventContent
 from mautrix.util.async_db import UpgradeTable
 from PIL import Image
+import re
 import time
 from .db import DBManager
 from .migrations import upgrade_table
@@ -40,6 +41,7 @@ class Splatoon3Plugin(Plugin):
 
 	@command.new(help="Shows you the current rotation.", require_subcommand=False)
 	async def splatoon3(self, evt: MessageEvent) -> None:
+		self.log.debug(evt.json())
 		resp = await self.http.get("https://splatoon3.ink/data/schedules.json")
 		if not resp.ok:
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
@@ -79,15 +81,17 @@ class Splatoon3Plugin(Plugin):
 			# todo when eggstra work happens
 			pass
 
-		nextChallengeTime = data.eventSchedules.nodes[0].timePeriods[self._get_next_period_index(data.eventSchedules.nodes[0].timePeriods)]
-		challengeName = data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.name
-		description += "\n\n**" + challengeName + "** "
-		if datetime.fromisoformat(nextChallengeTime.startTime) <= datetime.utcnow().replace(tzinfo=timezone.utc) <= datetime.fromisoformat(nextChallengeTime.endTime):
-			description += "is happening **right now!**"
-		else:
-			description += "will happen on **" + self._iso_str(nextChallengeTime.startTime) + "** (UTC+00:00)"
-		description += "  \n*" + data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.desc + "*"
-		description += "  \n" + self._stages_str(data.eventSchedules.nodes[0].leagueMatchSetting.vsStages)
+		if len(data.eventSchedules.nodes[0].timePeriods) > 0:
+			nextChallengeTime = data.eventSchedules.nodes[0].timePeriods[self._get_next_period_index(data.eventSchedules.nodes[0].timePeriods)]
+			challengeName = data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.name
+			description += "\n\n**" + challengeName + "** "
+			if self._is_now_between_isos(nextChallengeTime.startTime, nextChallengeTime.endTime):
+				description += "is happening **right now!**"
+			else:
+				tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+				description += f"will happen on **{self._iso_str(nextChallengeTime.startTime, tz)}** (UTC+{self._get_timezone_str(tz)})"
+			description += "  \n*" + data.eventSchedules.nodes[0].leagueMatchSetting.leagueMatchEvent.desc + "*"
+			description += "  \n" + self._stages_str(data.eventSchedules.nodes[0].leagueMatchSetting.vsStages)
 
 		await evt.reply(description)
 
@@ -98,7 +102,8 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		hasFest = False
 		for ii, node in enumerate(data.regularSchedules.nodes):
 			if not node.regularMatchSetting:
@@ -110,7 +115,7 @@ class Splatoon3Plugin(Plugin):
 			if ii == 0:
 				description += "**Now**"
 			else:
-				description += "**" + self._iso_str(node.startTime) + "**"
+				description += "**" + self._iso_str(node.startTime, tz) + "**"
 			description += "  \n" + self._stages_str(node.regularMatchSetting.vsStages)
 		await evt.reply(description)
 
@@ -121,7 +126,8 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		hasFest = False
 		for ii, node in enumerate(data.bankaraSchedules.nodes):
 			if not node.bankaraMatchSettings:
@@ -133,7 +139,7 @@ class Splatoon3Plugin(Plugin):
 			if ii == 0:
 				description += "**Now**"
 			else:
-				description += "**" + self._iso_str(node.startTime) + "**"
+				description += "**" + self._iso_str(node.startTime, tz) + "**"
 			description += "  \n" + self._stages_str(node.bankaraMatchSettings[0].vsStages)
 			description += " **" + node.bankaraMatchSettings[0].vsRule.name + "**"
 			description += "  \n" + self._stages_str(node.bankaraMatchSettings[1].vsStages)
@@ -147,7 +153,8 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		hasFest = False
 		for ii, node in enumerate(data.xSchedules.nodes):
 			if not node.xMatchSetting:
@@ -159,7 +166,7 @@ class Splatoon3Plugin(Plugin):
 			if ii == 0:
 				description += "**Now**"
 			else:
-				description += "**" + self._iso_str(node.startTime) + "**"
+				description += "**" + self._iso_str(node.startTime, tz) + "**"
 			description += "  \n" + self._stages_str(node.xMatchSetting.vsStages)
 			description += " **" + node.xMatchSetting.vsRule.name + "**"
 		await evt.reply(description)
@@ -171,7 +178,8 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		if data.currentFest:
 			# todo when splatfest happens
 			pass
@@ -184,7 +192,7 @@ class Splatoon3Plugin(Plugin):
 				if ii == 0:
 					description += "**Now**"
 				else:
-					description += "**" + self._iso_str(node.startTime) + "**"
+					description += "**" + self._iso_str(node.startTime, tz) + "**"
 				description += "  \n" + self._stages_str(node.festMatchSettings[0].vsStages)
 				description += " **" + node.festMatchSettings[0].vsRule.name + "**"
 				description += "  \n" + self._stages_str(node.festMatchSettings[1].vsStages)
@@ -200,11 +208,12 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		for ii, node in enumerate(data.coopGroupingSchedule.regularSchedules.nodes):
-			description += "\n\n**" + self._iso_str(node.startTime) + " - " + self._iso_str(node.endTime) + "**"
+			description += "\n\n**" + self._iso_str(node.startTime, tz) + " - " + self._iso_str(node.endTime, tz) + "**"
 			if ii == 0:
-				if datetime.fromisoformat(node.startTime) < datetime.utcnow().replace(tzinfo=timezone.utc) < datetime.fromisoformat(node.endTime):
+				if self._is_now_between_isos(node.startTime, node.endTime):
 					description += " **(Now!)**"
 			description += "  \n" + node.setting.coopStage.name + " | " + node.setting.boss.name
 			description += "  \n" + " / ".join(map(lambda w: w.name, node.setting.weapons))
@@ -217,13 +226,16 @@ class Splatoon3Plugin(Plugin):
 			await evt.reply("Splatoon3.ink is currently down. Unable to fetch schedule data.")
 			return
 		data = dotdict(await resp.json()).data
-		description = "Note: The times are in UTC+00:00"
+		tz = self._get_user_timezone((await evt.client.get_joined_members(evt.room_id))[evt.sender].displayname)
+		description = f"Note: The times are in UTC{self._get_timezone_str(tz)}"
 		for ii, node in enumerate(data.eventSchedules.nodes):
+			if len(node.timePeriods) < 0:
+				continue
 			nextTimeIndex = self._get_next_period_index(node.timePeriods)
 			description += "\n# " + node.leagueMatchSetting.leagueMatchEvent.name + "\n"
 			description += node.leagueMatchSetting.leagueMatchEvent.desc + "\n\n"
 			description += node.leagueMatchSetting.leagueMatchEvent.regulation + "\n\n"
-			description += "**" + self._iso_str(node.timePeriods[0].startTime) + " - " + self._iso_str(node.timePeriods[-1].endTime) + "**"
+			description += "**" + self._iso_str(node.timePeriods[0].startTime, tz) + " - " + self._iso_str(node.timePeriods[-1].endTime, tz) + "**"
 			if ii == 0:
 				if self._is_now_between_isos(node.timePeriods[nextTimeIndex].startTime, node.timePeriods[nextTimeIndex].endTime):
 					description += " **(Now!)**"
@@ -431,8 +443,8 @@ class Splatoon3Plugin(Plugin):
 	def _stages_str(self, vsStages: list[dotdict]) -> str:
 		return " | ".join(map(lambda x: x.name, vsStages))
 
-	def _iso_str(self, iso: str) -> str:
-		return datetime.fromisoformat(iso).strftime("%m/%d %H:%M")
+	def _iso_str(self, iso: str, tz_offset: int = 0) -> str:
+		return (datetime.fromisoformat(iso).replace(tzinfo=timezone.utc) + timedelta(hours=tz_offset)).strftime("%m/%d %H:%M")
 
 	def _is_now_between_isos(self, start: str, end: str) -> bool:
 		return datetime.fromisoformat(start) < datetime.utcnow().replace(tzinfo=timezone.utc) < datetime.fromisoformat(end)
@@ -475,3 +487,19 @@ class Splatoon3Plugin(Plugin):
 				nextTimeIndex = jj+1
 				break
 		return nextTimeIndex
+
+	def _get_user_timezone(self, name: str) -> int:
+		matches = re.findall(r"((\+?|-)\d{1,2})(:\d{2})?", name)
+		if not matches or len(matches) == 0 or len(matches[-1]) == 0:
+			return 0
+		timezone = 0
+		try:
+			timezone = int(matches[-1][0])
+		except ValueError as verr:
+			pass
+		except Exception as ex:
+			pass
+		return timezone
+
+	def _get_timezone_str(self, tz: int) -> str:
+		return ("+" if tz >= 0 else "-") + str(tz).zfill(2) + ":00"
