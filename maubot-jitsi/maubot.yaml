@@ -1,0 +1,7 @@
+maubot: 0.3.0
+id: in.northwestw.jitsi
+version: 1.0.0
+license: GPL-3.0-or-later
+modules:
+- jitsi
+main_class: JitsiPlugin
